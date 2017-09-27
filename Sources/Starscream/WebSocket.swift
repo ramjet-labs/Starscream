@@ -400,12 +400,14 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
     public weak var pongDelegate: WebSocketPongDelegate?
     
     public var onConnect: (() -> Void)?
+    public var onConnectSecurity: SSLTrustValidator?
     public var onDisconnect: ((Error?) -> Void)?
     public var onText: ((String) -> Void)?
     public var onData: ((Data) -> Void)?
     public var onPong: ((Data?) -> Void)?
     public var onHttpResponseHeaders: (([String: String]) -> Void)?
 
+    public var lastReceivedHeaders: [String: String]? = nil
     public var disableSSLCertValidation = false
     public var overrideTrustHostname = false
     public var desiredTrustHostname: String? = nil
@@ -685,12 +687,7 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
                     self.certValidated = false
                 #else
                     if let sec = self.security, !self.certValidated {
-                        let trustObj = self.stream.sslTrust()
-                        if let possibleTrust = trustObj.trust {
-                            self.certValidated = sec.isValid(possibleTrust, domain: trustObj.domain)
-                        } else {
-                            self.certValidated = false
-                        }
+                        self.validateSSLSecurity(securityTrust: sec, stream: self.stream)
                         if !self.certValidated {
                             self.disconnectStream(WSError(type: .invalidSSLError, message: "Invalid SSL certificate", code: 0))
                             return
@@ -839,6 +836,13 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
                     self.delegate?.websocketDidConnect(socket: self)
                     self.advancedDelegate?.websocketDidConnect(socket: self)
                     NotificationCenter.default.post(name: NSNotification.Name(WebsocketDidConnectNotification), object: self)
+                    if let sec = self.onConnectSecurity {
+                        self.validateSSLSecurity(securityTrust: sec, stream: self.stream)
+                        if !self.certValidated {
+                          self.disconnectStream(WSError(type: .invalidSSLError, message: "Invalid SSL certificate", code: 0))
+                          return
+                        }
+                    }
                 }
             }
             //totalSize += 1 //skip the last \n
@@ -881,7 +885,10 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
         if code != httpSwitchProtocolCode {
             return code
         }
-        
+      
+        // Capture Headers from response in publicly accessible variable
+        lastReceivedHeaders = headers
+      
         if let extensionHeader = headers[headerWSExtensionName.lowercased()] {
             processExtensionHeader(extensionHeader)
         }
@@ -1305,6 +1312,17 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
             let userInfo = error.map{ [WebsocketDisconnectionErrorKeyName: $0] }
             NotificationCenter.default.post(name: NSNotification.Name(WebsocketDidDisconnectNotification), object: self, userInfo: userInfo)
         }
+    }
+  
+    /**
+     */
+    private func validateSSLSecurity(securityTrust: SSLTrustValidator, stream: WSStream) {
+      let trustObj = stream.sslTrust()
+      if let possibleTrust = trustObj.trust {
+        self.certValidated = securityTrust.isValid(possibleTrust, domain: trustObj.domain)
+      } else {
+        self.certValidated = false
+      }
     }
 
     // MARK: - Deinit
