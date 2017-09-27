@@ -49,6 +49,7 @@ public enum ErrorType: Error {
     case protocolError //There was an error parsing the WebSocket frames
     case upgradeError //There was an error during the HTTP upgrade
     case closeError //There was an error during the close (socket probably has been dereferenced)
+    case sslSettingConstructionError // There was an error constructing SSL Settings
 }
 
 public struct WSError: Error {
@@ -105,6 +106,7 @@ extension WebSocketClient {
 public struct SSLSettings {
     public let useSSL: Bool
     public let disableCertValidation: Bool
+    public let clientIdentity: SecIdentity?
     public var overrideTrustHostname: Bool
     public var desiredTrustHostname: String?
     #if os(Linux)
@@ -167,21 +169,12 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             outStream.setProperty(StreamSocketSecurityLevel.negotiatedSSL as AnyObject, forKey: Stream.PropertyKey.socketSecurityLevelKey)
             #if os(watchOS) //watchOS us unfortunately is missing the kCFStream properties to make this work
             #else
-                var settings = [NSObject: NSObject]()
-                if ssl.disableCertValidation {
-                    settings[kCFStreamSSLValidatesCertificateChain] = NSNumber(value: false)
-                }
-                if ssl.overrideTrustHostname {
-                    if let hostname = ssl.desiredTrustHostname {
-                        settings[kCFStreamSSLPeerName] = hostname as NSString
-                    } else {
-                        settings[kCFStreamSSLPeerName] = kCFNull
-                    }
-                }
-                inStream.setProperty(settings, forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
-                outStream.setProperty(settings, forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
+            do {
+                try self.setSSLSettings(withSSLSettings: ssl, inStream: inStream, outStream: outStream)
+            } catch {
+              completion(errorWithDetail("Error setting SSL Settings", code: UInt16(InternalErrorCode.sslSettingConstructionError.rawValue)))
+            }
             #endif
-
             #if os(Linux)
             #else
             if let cipherSuites = ssl.cipherSuites {
@@ -296,6 +289,49 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             delegate?.streamDidError(error: nil)
         }
     }
+    
+    private func errorWithDetail(_ detail: String, code: UInt16) -> Error {
+        var details = [String: String]()
+        details[NSLocalizedDescriptionKey] =  detail
+        return NSError(domain: WebSocket.ErrorDomain, code: Int(code), userInfo: details) as Error
+    }
+  
+    private func getCertificateArray(identity: SecIdentity) throws -> NSArray {
+      var certRef: SecCertificate?
+      let certErr = SecIdentityCopyCertificate(identity, &certRef)
+      guard certErr == noErr else {
+        throw NSError(domain: NSOSStatusErrorDomain, code: Int(certErr), userInfo: nil)
+      }
+      return NSArray(objects: identity, certRef!)
+    }
+    
+    private func constructSSLSettings(withSSLSettings sslSettings: SSLSettings, forOutstream isOutstream: Bool = true) throws -> [NSObject: NSObject] {
+      var settings: [NSObject: NSObject] = [:]
+      if sslSettings.disableCertValidation {
+        settings[kCFStreamSSLValidatesCertificateChain] = NSNumber(value: false)
+        if ssl.overrideTrustHostname {
+            if let hostname = ssl.desiredTrustHostname {
+                settings[kCFStreamSSLPeerName] = hostname as NSString
+            } else {
+                settings[kCFStreamSSLPeerName] = kCFNull
+            }
+        }
+        if isOutstream, let clientIdentity = sslSettings.clientIdentity {
+          let certs = try getCertificateArray(identity: clientIdentity)
+          settings[kCFStreamSSLLevel] = kCFStreamSocketSecurityLevelNegotiatedSSL
+          settings[kCFStreamSSLCertificates] = certs
+          settings[kCFStreamSSLIsServer] = kCFBooleanFalse
+        }
+      }
+      return settings
+    }
+    
+    private func setSSLSettings(withSSLSettings sslSettings: SSLSettings, inStream: InputStream, outStream: OutputStream) throws {
+      let inSettings = try constructSSLSettings(withSSLSettings: sslSettings, forOutstream: false)
+      let outSettings = try constructSSLSettings(withSSLSettings: sslSettings)
+      inStream.setProperty(inSettings, forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
+      outStream.setProperty(outSettings, forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
+    }
 }
 
 //WebSocket implementation
@@ -399,7 +435,7 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
     public var disableSSLCertValidation = false
     public var overrideTrustHostname = false
     public var desiredTrustHostname: String? = nil
-
+    public var clientIdentity: SecIdentity? = nil
     public var enableCompression = true
     #if os(Linux)
     #else
@@ -650,6 +686,7 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
         #else
             let settings = SSLSettings(useSSL: useSSL,
                                        disableCertValidation: disableSSLCertValidation,
+                                       clientIdentity: clientIdentity,
                                        overrideTrustHostname: overrideTrustHostname,
                                        desiredTrustHostname: desiredTrustHostname,
                                        cipherSuites: self.enabledSSLCipherSuites)
