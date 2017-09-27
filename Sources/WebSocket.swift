@@ -172,7 +172,7 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
             do {
                 try self.setSSLSettings(withSSLSettings: ssl, inStream: inStream, outStream: outStream)
             } catch {
-              completion(errorWithDetail("Error setting SSL Settings", code: UInt16(InternalErrorCode.sslSettingConstructionError.rawValue)))
+              completion(WSError(type: .sslSettingConstructionError, message: "Error setting SSL Settings", code: 0))
             }
             #endif
             #if os(Linux)
@@ -309,8 +309,8 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
       var settings: [NSObject: NSObject] = [:]
       if sslSettings.disableCertValidation {
         settings[kCFStreamSSLValidatesCertificateChain] = NSNumber(value: false)
-        if ssl.overrideTrustHostname {
-            if let hostname = ssl.desiredTrustHostname {
+        if sslSettings.overrideTrustHostname {
+            if let hostname = sslSettings.desiredTrustHostname {
                 settings[kCFStreamSSLPeerName] = hostname as NSString
             } else {
                 settings[kCFStreamSSLPeerName] = kCFNull
@@ -427,11 +427,13 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
     public weak var pongDelegate: WebSocketPongDelegate?
     
     public var onConnect: (() -> Void)?
+    public var onConnectSecurity: SSLTrustValidator?
     public var onDisconnect: ((Error?) -> Void)?
     public var onText: ((String) -> Void)?
     public var onData: ((Data) -> Void)?
     public var onPong: ((Data?) -> Void)?
 
+    public var lastReceivedHeaders: [String: String]? = nil
     public var disableSSLCertValidation = false
     public var overrideTrustHostname = false
     public var desiredTrustHostname: String? = nil
@@ -709,12 +711,7 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
                     s.certValidated = false
                 #else
                     if let sec = s.security, !s.certValidated {
-                        let trustObj = s.stream.sslTrust()
-                        if let possibleTrust = trustObj.trust {
-                            s.certValidated = sec.isValid(possibleTrust, domain: trustObj.domain)
-                        } else {
-                            s.certValidated = false
-                        }
+                        s.validateSSLSecurity(securityTrust: sec, stream: s.stream)
                         if !s.certValidated {
                             s.disconnectStream(WSError(type: .invalidSSLError, message: "Invalid SSL certificate", code: 0))
                             return
@@ -863,6 +860,13 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
                     s.delegate?.websocketDidConnect(socket: s)
                     s.advancedDelegate?.websocketDidConnect(socket: s)
                     NotificationCenter.default.post(name: NSNotification.Name(WebsocketDidConnectNotification), object: self)
+                    if let sec = s.onConnectSecurity {
+                        s.validateSSLSecurity(securityTrust: sec, stream: s.stream)
+                        if !s.certValidated {
+                          s.disconnectStream(WSError(type: .invalidSSLError, message: "Invalid SSL certificate", code: 0))
+                          return
+                        }
+                    }
                 }
             }
             //totalSize += 1 //skip the last \n
@@ -904,7 +908,10 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
         if code != httpSwitchProtocolCode {
             return code
         }
-        
+      
+        // Capture Headers from response in publicly accessible variable
+        lastReceivedHeaders = headers
+      
         if let extensionHeader = headers[headerWSExtensionName.lowercased()] {
             processExtensionHeader(extensionHeader)
         }
@@ -1328,6 +1335,17 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
             let userInfo = error.map{ [WebsocketDisconnectionErrorKeyName: $0] }
             NotificationCenter.default.post(name: NSNotification.Name(WebsocketDidDisconnectNotification), object: self, userInfo: userInfo)
         }
+    }
+  
+    /**
+     */
+    private func validateSSLSecurity(securityTrust: SSLTrustValidator, stream: WSStream) {
+      let trustObj = stream.sslTrust()
+      if let possibleTrust = trustObj.trust {
+        self.certValidated = securityTrust.isValid(possibleTrust, domain: trustObj.domain)
+      } else {
+        self.certValidated = false
+      }
     }
 
     // MARK: - Deinit
