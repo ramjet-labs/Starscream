@@ -420,7 +420,8 @@ open class WebSocket : NSObject, StreamDelegate, WebSocketClient, WSStreamDelega
     public var enabledSSLCipherSuites: [SSLCipherSuite]?
     #endif
     
-    public var isConnected: Bool {
+    // For testing purposes, allowing overriding
+    open var isConnected: Bool {
         mutex.lock()
         let isConnected = connected
         mutex.unlock()
