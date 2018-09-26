@@ -181,12 +181,18 @@ open class FoundationStream : NSObject, WSStream, StreamDelegate  {
                         settings[kCFStreamSSLPeerName] = kCFNull
                     }
                 }
+                var outSettings = settings
                 if let sslClientCertificate = ssl.sslClientCertificate {
-                    settings[kCFStreamSSLCertificates] = sslClientCertificate.streamSSLCertificates
+                    outSettings[kCFStreamSSLLevel] = kCFStreamSocketSecurityLevelNegotiatedSSL
+                    outSettings[kCFStreamSSLCertificates] =
+                      sslClientCertificate.streamSSLCertificates
+                    outSettings[kCFStreamSSLIsServer] = kCFBooleanFalse
                 }
                 
-                inStream.setProperty(settings, forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
-                outStream.setProperty(settings, forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
+                inStream.setProperty(settings,
+                                     forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
+                outStream.setProperty(outSettings,
+                                      forKey: kCFStreamPropertySSLSettings as Stream.PropertyKey)
             #endif
 
             #if os(Linux)
